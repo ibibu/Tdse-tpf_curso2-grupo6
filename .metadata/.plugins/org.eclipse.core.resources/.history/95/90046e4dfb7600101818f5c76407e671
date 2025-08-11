@@ -1,0 +1,187 @@
+/*
+ * Aplicación principal con WCET por tarea (DWT->CYCCNT)
+ * Mide ciclos y microsegundos por cada task_update y expone resultados
+ * en task_prof[] para observar en Live Expressions.
+ */
+
+#include <task_sensor_temperature.h>
+#include "main.h"
+#include "logger.h"
+
+/* ADCs generados por CubeMX */
+extern ADC_HandleTypeDef hadc1;   // ADC1: sensor interno de temperatura
+extern ADC_HandleTypeDef hadc2;   // ADC2: externo (PA0 -> ADC_CHANNEL_0)
+
+/* Declaraciones de tareas */
+void task_sensor_init(void *params);
+void task_sensor_update(void *params);
+
+void task_sistema_init(void *params);
+void task_sistema_update(void *params);
+
+/********************** Definiciones y macros ********************************/
+#define G_APP_CNT_INI         0ul
+#define G_APP_TICK_CNT_INI    0ul
+
+/* Estructura para configuración de tareas */
+typedef struct {
+    const char *name;              // Nombre visible en profiling
+    void (*task_init)(void *);     // init
+    void (*task_update)(void *);   // update
+    void *parameters;              // params
+} task_cfg_t;
+
+/********************** Configuración de tareas *******************************/
+static const task_cfg_t task_cfg_list[] = {
+    { "task_sensor",  task_sensor_init,  task_sensor_update,  NULL },  // Botones
+    { "task_sistema", task_sistema_init, task_sistema_update, NULL },  // Display + TIn/TEx
+};
+#define TASK_QTY (sizeof(task_cfg_list)/sizeof(task_cfg_t))
+
+/********************** Profiling (WCET) *************************************/
+/* Estructura de perfil por tarea: lista para Live Expressions */
+typedef struct {
+    const char *name;            // Copiado desde task_cfg_list[i].name
+    uint32_t    last_cycles;     // Última ejecución en ciclos
+    uint32_t    wcet_cycles;     // Máximo observado en ciclos
+    uint32_t    last_us;         // Última ejecución en microsegundos
+    uint32_t    wcet_us;         // Máximo observado en microsegundos
+    uint32_t    calls;           // Cantidad de llamadas
+} task_prof_t;
+
+/* Arreglo global visible desde el debugger */
+volatile task_prof_t task_prof[TASK_QTY];
+
+/* Acumulado por tick (útil para ver “presupuesto” total del scheduler) */
+volatile task_prof_t task_prof_total = {
+    .name = "TOTAL_TICK",
+    .last_cycles = 0,
+    .wcet_cycles = 0,
+    .last_us = 0,
+    .wcet_us = 0,
+    .calls = 0
+};
+
+/* Helpers DWT */
+static inline void dwt_init(void)
+{
+    /* Habilitar el bloque DWT y el contador de ciclos */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;   // Trace enable
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;              // CYCCNT enable
+}
+
+static inline uint32_t dwt_get_cycles(void)
+{
+    return DWT->CYCCNT;
+}
+
+static inline uint32_t cycles_to_us(uint32_t cycles)
+{
+    /* Evitar overflow: usar 64 bits en el intermedio */
+    return (uint32_t)(((uint64_t)cycles * 1000000ull) / (uint64_t)SystemCoreClock);
+}
+
+/********************** Variables globales ***********************************/
+uint32_t g_app_cnt;                  // Contador principal de ciclos
+volatile uint32_t g_app_tick_cnt;    // Contador de ticks para disparar update
+
+/********************** Implementación de funciones **************************/
+
+/**
+ * @brief Inicializa la aplicación y todas las tareas registradas.
+ */
+void app_init(void)
+{
+    uint32_t index;
+
+    LOGGER_LOG("\r\n");
+    LOGGER_LOG("Iniciando aplicación - Tick [ms] = %lu\r\n", HAL_GetTick());
+
+    g_app_cnt = G_APP_CNT_INI;
+
+    /* Inicializar DWT para mediciones de ciclos */
+    dwt_init();
+
+    /* Inicialización del módulo de temperatura */
+    sen_temp_init(&hadc1, &hadc2, ADC_CHANNEL_0, 100, 3.30f);
+
+    LOGGER_LOG("Cantidad de tareas: %u\r\n", (unsigned)TASK_QTY);
+
+    /* Inicializar perf y tareas */
+    for (index = 0; index < TASK_QTY; index++)
+    {
+        task_prof[index].name        = task_cfg_list[index].name;
+        task_prof[index].last_cycles = 0;
+        task_prof[index].wcet_cycles = 0;
+        task_prof[index].last_us     = 0;
+        task_prof[index].wcet_us     = 0;
+        task_prof[index].calls       = 0;
+
+        if (task_cfg_list[index].task_init != NULL)
+        {
+            task_cfg_list[index].task_init(task_cfg_list[index].parameters);
+        }
+    }
+}
+
+/**
+ * @brief Actualiza el sistema ejecutando las tareas cuando hay un tick disponible.
+ */
+void app_update(void)
+{
+    uint32_t index;
+
+    if (G_APP_TICK_CNT_INI < g_app_tick_cnt)
+    {
+        g_app_tick_cnt--;
+        g_app_cnt++;
+
+        /* Medir costo total del tick */
+        uint32_t tick_start = dwt_get_cycles();
+
+        /* Recorremos todas las tareas con profiling */
+        for (index = 0; index < TASK_QTY; index++)
+        {
+            if (task_cfg_list[index].task_update != NULL)
+            {
+                uint32_t t0 = dwt_get_cycles();
+
+                task_cfg_list[index].task_update(task_cfg_list[index].parameters);
+
+                uint32_t dt_cycles = dwt_get_cycles() - t0;
+                uint32_t dt_us     = cycles_to_us(dt_cycles);
+
+                task_prof[index].last_cycles = dt_cycles;
+                task_prof[index].last_us     = dt_us;
+                task_prof[index].calls++;
+
+                if (dt_cycles > task_prof[index].wcet_cycles) {
+                    task_prof[index].wcet_cycles = dt_cycles;
+                    task_prof[index].wcet_us     = dt_us;
+                }
+            }
+        }
+
+        /* Cerrar medición total */
+        uint32_t tick_dt_cycles = dwt_get_cycles() - tick_start;
+        uint32_t tick_dt_us     = cycles_to_us(tick_dt_cycles);
+
+        task_prof_total.last_cycles = tick_dt_cycles;
+        task_prof_total.last_us     = tick_dt_us;
+        task_prof_total.calls++;
+
+        if (tick_dt_cycles > task_prof_total.wcet_cycles) {
+            task_prof_total.wcet_cycles = tick_dt_cycles;
+            task_prof_total.wcet_us     = tick_dt_us;
+        }
+    }
+}
+
+/**
+ * @brief Callback de SysTick: incrementa el contador para disparar las tareas.
+ */
+void HAL_SYSTICK_Callback(void)
+{
+    g_app_tick_cnt++;
+}

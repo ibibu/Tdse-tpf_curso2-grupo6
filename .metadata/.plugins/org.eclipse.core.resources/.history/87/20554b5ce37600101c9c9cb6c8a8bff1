@@ -1,0 +1,108 @@
+/*
+ * Tarea "sistema": muestra MODO y las temperaturas no bloqueantes TIn/TEx en el LCD.
+ *
+ * - Línea 0 (primera): MODO (placeholder)
+ * - Línea 3 (última):  TIn y TEx en °C (ambas juntas, sin usar %f)
+ *
+ * Requiere el módulo sen_temp (no bloqueante) y el driver display (20x4).
+ */
+
+#include "main.h"
+#include "display.h"
+#include "sen_temp.h"
+#include "logger.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h> // para abs()
+
+/* ADCs provistos por CubeMX (definidos en main.c) */
+extern ADC_HandleTypeDef hadc1;   // ADC1: sensor interno (TEMPSENSOR)
+extern ADC_HandleTypeDef hadc2;   // ADC2: sensor externo
+
+/* -------------------- LCD helpers -------------------- */
+static char s_line[21];  // 20 columnas + '\0'
+
+static void lcd_print_padded(uint8_t col, uint8_t row, const char* txt)
+{
+    displayCharPositionWrite(col, row);
+    memset(s_line, ' ', 20);
+    s_line[20] = '\0';
+    size_t n = strlen(txt);
+    if (n > 20) n = 20;
+    memcpy(s_line, txt, n);
+    displayStringWrite(s_line);
+}
+
+/* -------------------- Estado local -------------------- */
+static uint32_t s_next_lcd_tick = 0;
+#define LCD_PERIOD_MS  200
+
+/* Últimos valores (°C) */
+static float s_tin = 0.0f;
+static float s_tex = 0.0f;
+
+/* (Placeholder) función para renderizar el modo en línea 0.
+   Si tenés tu módulo de cinta con getters, incluí "cinta.h" y devolvé el modo real. */
+static const char* modo_to_str(void)
+{
+    return "MODO: ---";   // reemplazar por tu estado real (FALLA/MANUAL/AUTO)
+}
+
+/* -------------------- API de la tarea -------------------- */
+void task_sistema_init(void *params)
+{
+    /* Init display */
+    displayInit();
+
+    /* Mensaje de arranque */
+    lcd_print_padded(0, 0, "Sistema listo");
+
+    /* Init mediciones NO bloqueantes:
+       - Interna: ADC1 / TEMPSENSOR
+       - Externa: ADC2 / canal que uses (AJUSTAR canal si no es ADC_CHANNEL_1)
+       - Periodo: 100 ms
+       - VDDA: 3.30 V
+    */
+    sen_temp_init(&hadc1, &hadc2, ADC_CHANNEL_1, 100, 3.30f);
+
+    /* Primer refresco inmediato */
+    s_next_lcd_tick = HAL_GetTick();
+}
+
+void task_sistema_update(void *params)
+{
+    /* Avanzar la medición NO bloqueante */
+    sen_temp_update();
+
+    /* Si hay dato nuevo, actualizar buffers locales (no bloquea) */
+    float t;
+    if (sen_temp_get_internal(&t)) s_tin = t;
+    if (sen_temp_get_external(&t)) s_tex = t;
+
+    /* Refresco de pantalla no bloqueante */
+    uint32_t now = HAL_GetTick();
+    if ((int32_t)(now - s_next_lcd_tick) >= 0)
+    {
+        /* Línea 0: MODO */
+        lcd_print_padded(0, 0, modo_to_str());
+
+        /* Línea 3 (última): TIn y TEx en °C, SIN %f (fixed-point 1 decimal) */
+        int tin10 = (int)(s_tin * 10.0f + (s_tin >= 0 ? 0.5f : -0.5f)); // redondeo a décima
+        int tex10 = (int)(s_tex * 10.0f + (s_tex >= 0 ? 0.5f : -0.5f));
+
+        char buf[32];
+        snprintf(buf, sizeof(buf), "TIn:%3d.%01dC TEx:%3d.%01dC",
+                 tin10 / 10, abs(tin10 % 10),
+                 tex10 / 10, abs(tex10 % 10));
+        lcd_print_padded(0, 3, buf);
+
+        /* (Opcional) log sin %f */
+        // LOGGER_LOG("T_int=%d.%d T_ext=%d.%d\r\n",
+        //            tin10/10, abs(tin10%10), tex10/10, abs(tex10%10));
+
+        s_next_lcd_tick = now + LCD_PERIOD_MS;
+    }
+
+    /* TODO: acá podés integrar tu lógica de botones/velocidad/modos/EEPROM,
+       siempre de forma no bloqueante. */
+}

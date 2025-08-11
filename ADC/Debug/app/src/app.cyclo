@@ -1,0 +1,11 @@
+../app/src/app.c:33:13:actuadores_init_adapter	1
+../app/src/app.c:34:13:actuadores_update_adapter	1
+../app/src/app.c:59:20:dwt_init	1
+../app/src/app.c:65:24:dwt_get_cycles	1
+../app/src/app.c:66:24:cycles_to_us	1
+../app/src/app.c:82:24:systick_period_us_reg	2
+../app/src/app.c:98:13:app_cpu_snapshot_log	1
+../app/src/app.c:111:13:wcet_dump	12
+../app/src/app.c:170:6:app_init	3
+../app/src/app.c:188:6:app_update	13
+../app/src/app.c:258:6:HAL_SYSTICK_Callback	1

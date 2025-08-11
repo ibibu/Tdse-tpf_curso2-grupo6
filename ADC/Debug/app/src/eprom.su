@@ -1,0 +1,4 @@
+../app/src/eprom.c:4:6:EPROM_WriteByte	32	static
+../app/src/eprom.c:17:6:EPROM_ReadByte	40	static
+../app/src/eprom.c:31:6:EPROM_WriteBuffer	32	static
+../app/src/eprom.c:39:6:EPROM_ReadBuffer	32	static

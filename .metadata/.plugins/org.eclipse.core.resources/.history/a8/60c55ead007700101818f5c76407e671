@@ -1,0 +1,202 @@
+#include "cinta.h"
+#include "task_sensor.h"
+#include "display.h"
+#include "eprom.h"
+#include "main.h"
+#include "stm32f1xx_hal.h"
+#include <stdio.h>
+#include <string.h>
+#include <task_sensor_temperature.h>
+#include <task_system.h>
+
+// --- Variables internas ---
+static Cinta cinta_actual;
+static uint8_t velocidad_guardada = 0;
+static uint8_t contador_auto = 0;
+static uint32_t last_pulse_tick = 0;
+
+// Temperaturas no bloqueantes (sen_temp)
+static float tin_c = 0.0f;  // interna en °C (real)
+static float tex_g = 0.0f;  // externa mapeada 0..100 (pot)
+
+// --- Constantes ---
+#define INTERVALO_RESET_MS   10000  // 10 s sin pulsos -> reset
+#define TEMP_MAX             80     // Umbral de temperatura para falla
+#define EEPROM_ADDR_MODO     0x00
+#define EEPROM_ADDR_VEL      0x01
+#define SISTEMA_PERIOD_MS    50     // UI: refresco cada 50 ms (20 Hz)
+
+extern I2C_HandleTypeDef hi2c1;
+
+// --- Prototipos internos ---
+static void guardar_configuracion(void);
+static void leer_configuracion(void);
+
+// --- Helper UI throttle: solo LCD ---
+static uint32_t ui_next_ms = 0; // al poner 0 forzás refresh inmediato
+
+static void guardar_configuracion(void)
+{
+    // Guardamos modo y velocidad (solo si no estamos en Falla)
+    if (cinta_get_modo(&cinta_actual) != 0) {
+        EPROM_WriteByte(&hi2c1, EEPROM_ADDR_MODO, (uint8_t)cinta_get_modo(&cinta_actual));
+        EPROM_WriteByte(&hi2c1, EEPROM_ADDR_VEL,  (uint8_t)velocidad_guardada);
+    }
+}
+
+static void leer_configuracion(void)
+{
+    uint8_t modo_leido = 1;
+    uint8_t vel_leida  = 0;
+
+    EPROM_ReadByte(&hi2c1, EEPROM_ADDR_MODO, &modo_leido);
+    EPROM_ReadByte(&hi2c1, EEPROM_ADDR_VEL,  &vel_leida);
+
+    if (modo_leido == 1 || modo_leido == 2)
+        cinta_set_modo(&cinta_actual, (int8_t)modo_leido);
+    else
+        cinta_set_modo(&cinta_actual, 1); // Por defecto
+
+    if (vel_leida <= 2)
+        velocidad_guardada = vel_leida;
+    else
+        velocidad_guardada = 0;
+
+    cinta_set_velocidad(&cinta_actual, (int8_t)velocidad_guardada);
+}
+
+void task_sistema_init(void *params)
+{
+    cinta_inicializar(&cinta_actual);
+    HAL_Delay(100);
+    displayInit();
+
+    leer_configuracion(); // Restauramos configuración
+
+    displayCharPositionWrite(0, 0);
+    displayStringWrite("Sistema Listo ");
+    displayCharPositionWrite(0, 1);
+    displayStringWrite("Iniciando...");
+    HAL_Delay(300);
+
+    ui_next_ms = 0; // primer refresh inmediato
+}
+
+void task_sistema_update(void *params)
+{
+    // --- Sensado no bloqueante ---
+    sen_temp_update();
+    float ttmp;
+    if (sen_temp_get_internal(&ttmp)) tin_c = ttmp; // °C reales
+    if (sen_temp_get_external(&ttmp)) tex_g = ttmp; // 0..100
+
+    // --- Protección por temperatura (fuerza refresh si cambia estado) ---
+    if ((tin_c > (float)TEMP_MAX) || (tex_g > (float)TEMP_MAX)) {
+        if (cinta_get_modo(&cinta_actual) != 0) {
+            cinta_set_modo(&cinta_actual, 0);
+            cinta_set_velocidad(&cinta_actual, 0);
+            velocidad_guardada = 0;
+            contador_auto = 0;
+            ui_next_ms = 0; // refrescar ya
+        }
+    }
+
+    // --- Botones ---
+    // BTN_2: Falla ON/OFF
+    if (task_sensor_get_edge(BTN_2)) {
+        if (cinta_get_modo(&cinta_actual) != 0) {
+            cinta_set_modo(&cinta_actual, 0);
+            cinta_set_velocidad(&cinta_actual, 0);
+            velocidad_guardada = 0;
+            contador_auto = 0;
+        } else {
+            cinta_set_modo(&cinta_actual, 1);
+            cinta_set_velocidad(&cinta_actual, 0);
+        }
+        ui_next_ms = 0; // refrescar ya
+    }
+
+    // BTN_3: Manual / Automático
+    if (task_sensor_get_edge(BTN_3) && cinta_get_modo(&cinta_actual) != 0) {
+        if (cinta_get_modo(&cinta_actual) == 1) {
+            cinta_set_modo(&cinta_actual, 2);
+            contador_auto = 0;
+            last_pulse_tick = HAL_GetTick();
+            cinta_set_velocidad(&cinta_actual, (int8_t)velocidad_guardada);
+        } else {
+            cinta_set_modo(&cinta_actual, 1);
+            cinta_set_velocidad(&cinta_actual, (int8_t)velocidad_guardada);
+        }
+        guardar_configuracion();
+        ui_next_ms = 0; // refrescar ya
+    }
+
+    // BTN_4: Velocidad manual (solo en manual)
+    if (cinta_get_modo(&cinta_actual) == 1 && task_sensor_get_edge(BTN_4)) {
+        velocidad_guardada = (uint8_t)((velocidad_guardada + 1) % 3);
+        cinta_set_velocidad(&cinta_actual, (int8_t)velocidad_guardada);
+        guardar_configuracion();
+        ui_next_ms = 0; // refrescar ya
+    }
+
+    // BTN_1: Contador automático (solo en auto)
+    if (cinta_get_modo(&cinta_actual) == 2 && task_sensor_get_edge(BTN_1)) {
+        contador_auto++;
+        last_pulse_tick = HAL_GetTick();
+
+        velocidad_guardada = (contador_auto >= 2) ? 2 : 1;
+        cinta_set_velocidad(&cinta_actual, (int8_t)velocidad_guardada);
+        guardar_configuracion();
+        ui_next_ms = 0; // refrescar ya
+    }
+
+    // --- Reset automático tras 10 s sin pulsos (solo en auto) ---
+    if (cinta_get_modo(&cinta_actual) == 2 &&
+        (HAL_GetTick() - last_pulse_tick) >= INTERVALO_RESET_MS) {
+        contador_auto = 0;
+        velocidad_guardada = 0;
+        cinta_set_velocidad(&cinta_actual, 0);
+        guardar_configuracion();
+        ui_next_ms = 0; // refrescar ya
+    }
+
+    // --- LED Semáforo (siempre inmediato, es barato) ---
+    if (cinta_get_modo(&cinta_actual) == 0) {
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_SET);   // Rojo ON
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, GPIO_PIN_RESET); // Amarillo OFF
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, GPIO_PIN_RESET); // Verde OFF
+    } else {
+        int vel = cinta_get_velocidad(&cinta_actual);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_8, GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_6, (vel == 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_5, (vel > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    }
+
+    // --- UI throttle: refrescar LCD cada SISTEMA_PERIOD_MS o inmediato si ui_next_ms==0 ---
+    uint32_t now = HAL_GetTick();
+    if (ui_next_ms != 0 && (int32_t)(now - ui_next_ms) < 0) {
+        return; // todavía no toca refrescar el LCD
+    }
+    ui_next_ms = now + SISTEMA_PERIOD_MS;
+
+    // --- Actualizar LCD solo si cambió ---
+    static char prevL0[24] = {0}, prevL1[24] = {0}, prevL2[24] = {0};
+    char L0[24], L1[24], L2[24];
+
+    snprintf(L0, sizeof L0,
+             (cinta_get_modo(&cinta_actual)==0) ? "MODO: FALLA  " :
+             (cinta_get_modo(&cinta_actual)==1) ? "MODO: MANUAL " :
+                                                  "MODO: AUTO   ");
+
+    int vel_display = (cinta_get_modo(&cinta_actual)==0) ? 0 : cinta_get_velocidad(&cinta_actual);
+    snprintf(L1, sizeof L1, "VEL:%d  PAQ:%05u", vel_display, (unsigned)contador_auto);
+
+    int tin10 = (int)(tin_c * 10.0f + (tin_c >= 0 ? 0.5f : -0.5f));  // décimas con redondeo
+    int tex   = (int)(tex_g + 0.5f);                                 // entero 0..100
+    snprintf(L2, sizeof L2, "TIn:%3d.%01dC TEx:%3dC",
+             tin10/10, (tin10 < 0 ? -(tin10%10) : (tin10%10)), tex);
+
+    if (strcmp(L0, prevL0)!=0) { displayCharPositionWrite(0,0); displayStringWrite(L0); strcpy(prevL0,L0); }
+    if (strcmp(L1, prevL1)!=0) { displayCharPositionWrite(0,1); displayStringWrite(L1); strcpy(prevL1,L1); }
+    if (strcmp(L2, prevL2)!=0) { displayCharPositionWrite(0,2); displayStringWrite(L2); strcpy(prevL2,L2); }
+}

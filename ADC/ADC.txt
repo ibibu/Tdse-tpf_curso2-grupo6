@@ -1,0 +1,17 @@
+# ADC
+
+
+Test 1:
+Desviacion Estandar = 0.001409747599650676
+Mean	Median	Mode	Range
+1865	1864	1862	12.00
+
+Test 2:
+Desviacion Estandar = 0.000359064119595815
+Mean	Median	Mode	Range
+1863	1863	1863	4.000
+
+Test 3:
+Desviacion Estandar = 0.0014716861991425979
+Mean	Median	Mode	Range
+1857	1858	1860	9.000

@@ -1,0 +1,339 @@
+/*
+ * sistema.c
+ * Modos, velocidad, paquetes (AUTO), semáforo, EEPROM y display + temperaturas (NO bloqueante).
+ *
+ * LCD 20x4:
+ *  L0: MODO
+ *  L1: VEL y PAQ
+ *  L2: TIn (°C, 1 dec sin %f) y TEx (0..100)
+ *
+ * Botones:
+ *  - BTN_1: MANUAL <-> AUTO (ignorado en FALLA)
+ *  - BTN_2: FALLA <-> MANUAL (al entrar en FALLA: vel=0)
+ *  - BTN_3: PAQ++ (solo AUTO). Regla en AUTO: VEL = PAQ (0..2). Tras 10 s sin PAQ: PAQ=0 y VEL=0
+ *  - BTN_4: Velocidad ping‑pong (solo MANUAL): 0→1→2→1→0→...
+ */
+
+#include "main.h"
+#include "display.h"
+#include "cinta.h"
+#include "task_sensor.h"
+#include "eprom.h"
+#include "sen_temp.h"
+#include "logger.h"
+
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>   // abs()
+
+/* ========================= Configuración ========================= */
+
+/* Mapeo de botones (ajustar si tu hardware difiere) */
+#define BTN_MODE_TOGGLE   BTN_1   /* MANUAL <-> AUTO */
+#define BTN_FAIL_TOGGLE   BTN_2   /* FALLA <-> MANUAL (vel=0 al entrar) */
+#define BTN_PAQ           BTN_3   /* +1 paquete (solo AUTO) */
+#define BTN_VEL           BTN_4   /* Velocidad ping‑pong (solo MANUAL) */
+
+/* Pines del semáforo (ajustar si hace falta) */
+#define SEM_GPIO             GPIOC
+#define SEM_PIN_ROJO         GPIO_PIN_8
+#define SEM_PIN_AMARILLO     GPIO_PIN_6
+#define SEM_PIN_VERDE        GPIO_PIN_5
+
+/* EEPROM: direcciones para modo y velocidad */
+#define EEPROM_ADDR_MODO     0x0000
+#define EEPROM_ADDR_VEL      0x0001
+
+/* Periodos (ms) */
+#define LCD_PERIOD_MS        200u
+#define BLINK_PERIOD_MS      400u
+#define PAQ_TIMEOUT_MS       10000u  /* 10 s de inactividad en AUTO ⇒ PAQ=0 y VEL=0 */
+
+/* Límites */
+#define VEL_MIN              0
+#define VEL_MAX              2
+
+/* ADCs provistos por CubeMX */
+extern ADC_HandleTypeDef hadc1;   // ADC1: interna (TEMPSENSOR)
+extern ADC_HandleTypeDef hadc2;   // ADC2: externa (PA0 -> CH0)
+
+/* I2C para EEPROM */
+extern I2C_HandleTypeDef hi2c1;
+
+/* ========================= Estado local ========================= */
+
+static Cinta   s_cinta;                 /* modo y velocidad */
+static uint8_t s_vel_guardada = 0;      /* backup velocidad (persistencia) */
+static uint8_t s_modo_guardado = 1;     /* backup modo (persistencia) */
+
+static uint8_t  s_btn_prev[BTN_QTY];    /* para flancos */
+
+/* Paquetes (AUTO) */
+static uint32_t s_paq_count = 0;        /* 0..2 (saturado) */
+static uint32_t s_last_paq_tick = 0;    /* timestamp del último paquete */
+
+/* Temporizadores (no bloqueantes) */
+static uint32_t s_next_lcd_tick   = 0;
+static uint32_t s_next_blink_tick = 0;
+static uint8_t  s_blink           = 0;
+
+/* Temperaturas */
+static float s_tin = 0.0f;    /* °C interna */
+static float s_tex = 0.0f;    /* 0..100 externa (pot) */
+
+/* velocidad ping‑pong en MANUAL */
+static int8_t s_vel_dir = +1; /* +1 sube, -1 baja */
+
+/* LCD buffer */
+static char s_line[21];        /* 20 col + '\0' */
+
+/* ========================= Helpers ========================= */
+
+static void lcd_print_padded(uint8_t col, uint8_t row, const char* txt)
+{
+    displayCharPositionWrite(col, row);
+    memset(s_line, ' ', 20);
+    s_line[20] = '\0';
+    size_t n = strlen(txt);
+    if (n > 20) n = 20;
+    memcpy(s_line, txt, n);
+    displayStringWrite(s_line);
+}
+
+static const char* modo_to_str(int8_t modo)
+{
+    switch (modo) {
+        case 0: return "MODO: FALLA ";
+        case 1: return "MODO: MANUAL";
+        case 2: return "MODO: AUTO  ";
+        default: return "MODO: ---   ";
+    }
+}
+
+/* Flanco ascendente desde estado estable de task_sensor */
+static uint8_t btn_rising_edge(task_sensor_id_t id)
+{
+    uint8_t cur = task_sensor_get_state(id) ? 1 : 0;
+    uint8_t rising = (cur == 1) && (s_btn_prev[id] == 0);
+    s_btn_prev[id] = cur;
+    return rising;
+}
+
+/* Semáforo: set de colores */
+static void semaforo_set(GPIO_PinState rojo, GPIO_PinState amarillo, GPIO_PinState verde)
+{
+    HAL_GPIO_WritePin(SEM_GPIO, SEM_PIN_ROJO,     rojo);
+    HAL_GPIO_WritePin(SEM_GPIO, SEM_PIN_AMARILLO, amarillo);
+    HAL_GPIO_WritePin(SEM_GPIO, SEM_PIN_VERDE,    verde);
+}
+
+/* Persistir en EEPROM si cambian modo/vel */
+static void persist_if_changed(void)
+{
+    uint8_t modo = (uint8_t)cinta_get_modo(&s_cinta);
+    uint8_t vel  = (uint8_t)cinta_get_velocidad(&s_cinta);
+
+    if (modo != s_modo_guardado) {
+        EPROM_WriteByte(&hi2c1, EEPROM_ADDR_MODO, modo);
+        s_modo_guardado = modo;
+    }
+    if (vel != s_vel_guardada) {
+        EPROM_WriteByte(&hi2c1, EEPROM_ADDR_VEL, vel);
+        s_vel_guardada = vel;
+    }
+}
+
+/* Cargar configuración al iniciar */
+static void load_from_eeprom(void)
+{
+    uint8_t modo = 1;
+    uint8_t vel  = 0;
+
+    EPROM_ReadByte(&hi2c1, EEPROM_ADDR_MODO, &modo);
+    EPROM_ReadByte(&hi2c1, EEPROM_ADDR_VEL,  &vel);
+
+    if (modo > 2)       modo = 1;
+    if (vel > VEL_MAX)  vel  = 0;
+
+    cinta_set_modo(&s_cinta, modo);
+    cinta_set_velocidad(&s_cinta, vel);
+
+    s_modo_guardado = modo;
+    s_vel_guardada  = vel;
+}
+
+/* Semáforo según modo/velocidad (no bloqueante) */
+static void semaforo_update(void)
+{
+    uint32_t now = HAL_GetTick();
+    if ((int32_t)(now - s_next_blink_tick) >= 0) {
+        s_next_blink_tick = now + BLINK_PERIOD_MS;
+        s_blink ^= 1;
+    }
+
+    int8_t modo = cinta_get_modo(&s_cinta);
+    int8_t vel  = cinta_get_velocidad(&s_cinta);
+
+    if (modo == 0) {
+        /* FALLA -> ROJO sólido */
+        semaforo_set(GPIO_PIN_SET, GPIO_PIN_RESET, GPIO_PIN_RESET);
+    }
+    else {
+        /* MANUAL / AUTO: indicar velocidad */
+        if (vel == 0) {
+            semaforo_set(GPIO_PIN_RESET, GPIO_PIN_SET, GPIO_PIN_RESET);                 // amarillo sólido
+        } else if (vel == 1) {
+            semaforo_set(GPIO_PIN_RESET, GPIO_PIN_RESET, s_blink ? GPIO_PIN_SET : GPIO_PIN_RESET); // verde blink
+        } else {
+            semaforo_set(GPIO_PIN_RESET, GPIO_PIN_RESET, GPIO_PIN_SET);                 // verde sólido
+        }
+    }
+}
+
+/* Ajustar velocidad en AUTO en base a PAQ, persistiendo si cambia */
+static void auto_apply_vel_from_paq(void)
+{
+    int8_t new_vel = (s_paq_count >= 2) ? 2 : (int8_t)s_paq_count; // 0->0, 1->1, >=2->2
+    if (new_vel != cinta_get_velocidad(&s_cinta)) {
+        cinta_set_velocidad(&s_cinta, new_vel);
+        persist_if_changed();
+    }
+}
+
+/* ========================= Tarea: init/update ========================= */
+
+void task_sistema_init(void *params)
+{
+    /* Cinta (modo/velocidad) */
+    cinta_inicializar(&s_cinta);
+
+    /* Display */
+    displayInit();
+    lcd_print_padded(0, 0, "Sistema listo");
+    lcd_print_padded(0, 1, "Cargando conf...");
+
+    /* EEPROM -> cargar */
+    load_from_eeprom();
+
+    /* Botones: arrancar estado previo */
+    for (int i = 0; i < BTN_QTY; i++)
+        s_btn_prev[i] = task_sensor_get_state((task_sensor_id_t)i);
+
+    /* Temperaturas (NO bloqueante)
+       - Interna: ADC1/TEMPSENSOR (implícito en sen_temp)
+       - Externa: ADC2/PA0 (ADC_CHANNEL_0) mapeada 0..100 */
+    sen_temp_init(&hadc1, &hadc2, ADC_CHANNEL_0, 100, 3.30f);
+
+    /* Timers */
+    s_next_lcd_tick   = HAL_GetTick();
+    s_next_blink_tick = HAL_GetTick();
+    s_blink           = 0;
+
+    /* Si arrancamos en AUTO: asegurar PAQ y VEL coherentes */
+    if (cinta_get_modo(&s_cinta) == 2) {
+        s_paq_count     = 0;
+        s_last_paq_tick = HAL_GetTick();
+        auto_apply_vel_from_paq();  /* vel=0 */
+    }
+
+    /* Pintar modo actual */
+    lcd_print_padded(0, 0, modo_to_str(cinta_get_modo(&s_cinta)));
+}
+
+void task_sistema_update(void *params)
+{
+    /* -------- Temperaturas (no bloqueante) -------- */
+    sen_temp_update();
+
+    float t;
+    if (sen_temp_get_internal(&t))  { s_tin = t; }   /* °C */
+    if (sen_temp_get_external(&t))  { s_tex = t; }   /* 0..100 */
+
+    /* -------- Botones (flancos) -------- */
+    /* FALLA <-> MANUAL (BTN_2) */
+    if (btn_rising_edge(BTN_FAIL_TOGGLE)) {
+        if (cinta_get_modo(&s_cinta) == 0) {
+            /* salir de FALLA -> MANUAL, restaurar velocidad guardada */
+            cinta_set_modo(&s_cinta, 1);
+            cinta_set_velocidad(&s_cinta, s_vel_guardada);
+        } else {
+            /* entrar a FALLA -> guardar vel actual y poner vel=0 */
+            s_vel_guardada = cinta_get_velocidad(&s_cinta);
+            cinta_set_modo(&s_cinta, 0);
+            cinta_set_velocidad(&s_cinta, 0);
+        }
+        persist_if_changed();
+    }
+
+    /* MANUAL <-> AUTO (BTN_1) (ignorar si FALLA) */
+    if (btn_rising_edge(BTN_MODE_TOGGLE) && cinta_get_modo(&s_cinta) != 0) {
+        if (cinta_get_modo(&s_cinta) == 1) {
+            /* MANUAL -> AUTO: PAQ=0, vel=0 */
+            cinta_set_modo(&s_cinta, 2);
+            s_paq_count     = 0;
+            s_last_paq_tick = HAL_GetTick();
+            auto_apply_vel_from_paq();
+        } else {
+            /* AUTO -> MANUAL: mantiene velocidad actual */
+            cinta_set_modo(&s_cinta, 1);
+        }
+        persist_if_changed();
+    }
+
+    /* +1 PAQ (BTN_3) en AUTO */
+    if (btn_rising_edge(BTN_PAQ) && cinta_get_modo(&s_cinta) == 2) {
+        if (s_paq_count < 2) s_paq_count++;
+        s_last_paq_tick = HAL_GetTick();
+        auto_apply_vel_from_paq();  /* VEL = PAQ */
+    }
+
+    /* Velocidad ping‑pong (BTN_4) en MANUAL: 0→1→2→1→0... */
+    if (btn_rising_edge(BTN_VEL) && cinta_get_modo(&s_cinta) == 1) {
+        int vel = cinta_get_velocidad(&s_cinta);
+        vel += s_vel_dir;
+        if (vel >= 2) { vel = 2; s_vel_dir = -1; }
+        else if (vel <= 0) { vel = 0; s_vel_dir = +1; }
+        cinta_set_velocidad(&s_cinta, (int8_t)vel);
+        persist_if_changed();
+    }
+
+    /* -------- Timeout PAQ en AUTO (10 s) -------- */
+    if (cinta_get_modo(&s_cinta) == 2) {
+        uint32_t now = HAL_GetTick();
+        if (s_paq_count > 0 && (int32_t)(now - s_last_paq_tick) >= (int32_t)PAQ_TIMEOUT_MS) {
+            s_paq_count     = 0;
+            s_last_paq_tick = now;   /* evita re-disparo inmediato */
+            auto_apply_vel_from_paq();  /* vel=0 */
+        }
+    }
+
+    /* -------- Semáforo -------- */
+    semaforo_update();
+
+    /* -------- LCD (no bloqueante) -------- */
+    uint32_t now = HAL_GetTick();
+    if ((int32_t)(now - s_next_lcd_tick) >= 0) {
+
+        /* L0: MODO */
+        lcd_print_padded(0, 0, modo_to_str(cinta_get_modo(&s_cinta)));
+
+        /* L1: VEL y PAQ */
+        char l1[21];
+        snprintf(l1, sizeof(l1), "VEL:%d  PAQ:%05lu",
+                 (int)cinta_get_velocidad(&s_cinta),
+                 (unsigned long)s_paq_count);
+        lcd_print_padded(0, 1, l1);
+
+        /* L2: TIn (°C con 1 decimal, sin %f) y TEx (0..100) */
+        int tin10 = (int)(s_tin * 10.0f + (s_tin >= 0 ? 0.5f : -0.5f));  /* décima */
+        int tex   = (int)(s_tex + 0.5f);                                 /* entero 0..100 */
+
+        char l2[32];
+        snprintf(l2, sizeof(l2), "TIn:%3d.%01dC TEx:%3d",
+                 tin10/10, abs(tin10%10),
+                 tex);
+        lcd_print_padded(0, 2, l2);
+
+        s_next_lcd_tick = now + LCD_PERIOD_MS;
+    }
+}

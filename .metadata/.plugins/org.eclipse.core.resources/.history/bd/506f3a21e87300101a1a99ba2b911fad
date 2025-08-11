@@ -1,0 +1,14 @@
+#include "display.h"
+
+void task_sistema_init(void *params)
+{
+    display_init();  // Inicializa el LCD
+    display_clear();
+    display_set_cursor(0, 0);
+    display_write("Display OK :)");
+}
+
+void task_sistema_update(void *params)
+{
+    // No hace nada por ahora
+}

@@ -1,0 +1,3 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<session version="1.0">&#x0A;<refactoring comment="Rename resource &apos;ADC/app/src/Modos.c&apos; to &apos;sistema.c&apos;" description="Rename resource &apos;Modos.c&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="app/src/Modos.c" name="sistema.c" stamp="1754161077182" updateReferences="true"/>&#x0A;<refactoring comment="Rename resource &apos;ADC/app/inc/Modos.h&apos; to &apos;sstemas.h&apos;" description="Rename resource &apos;Modos.h&apos;" flags="7" id="org.eclipse.ltk.core.refactoring.rename.resource" input="app/inc/Modos.h" name="sstemas.h" stamp="1754161088306" updateReferences="true"/>
+</session>

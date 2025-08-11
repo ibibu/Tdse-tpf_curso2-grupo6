@@ -1,0 +1,38 @@
+#ifndef SEN_TEMP_H
+#define SEN_TEMP_H
+
+#include "stm32f1xx_hal.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Inicializa medición no bloqueante.
+ * hadc_int  : ADC para sensor interno (típicamente &hadc1).
+ * hadc_ext  : ADC para sensor externo (típicamente &hadc2).
+ * ext_chan  : canal del sensor externo (p.ej. ADC_CHANNEL_1).
+ * period_ms : periodo entre mediciones de cada sensor (>=50 ms sugerido).
+ * vdda      : VDDA en volts (3.3 por defecto si pasás 0).
+ */
+void sen_temp_init(ADC_HandleTypeDef *hadc_int,
+                   ADC_HandleTypeDef *hadc_ext,
+                   uint32_t ext_chan,
+                   uint32_t period_ms,
+                   float vdda);
+
+/* Llamar en tu loop/tarea para disparar próximas conversiones cuando corresponde */
+void sen_temp_update(void);
+
+/* Getters: devuelven true si hay dato nuevo y lo consumen */
+bool sen_temp_get_internal(float *t_c);
+bool sen_temp_get_external(float *t_c);
+
+/* (Opcional) actualizar VDDA si la medís con Vrefint */
+void sen_temp_set_vdda(float vdda);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* SEN_TEMP_H */

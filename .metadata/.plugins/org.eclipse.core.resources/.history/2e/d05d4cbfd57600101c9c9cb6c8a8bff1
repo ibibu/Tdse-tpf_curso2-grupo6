@@ -1,0 +1,13 @@
+#include "display.h"
+
+void task_sistema_init(void)
+{
+    displayInit(); // Inicializa el display
+    displayCharPositionWrite(0, 0); // Posiciona el cursor en la primera línea
+    displayStringWrite("Display OK :)"); // Escribe mensaje
+}
+
+void task_sistema_update(void)
+{
+    // Nada por ahora
+}

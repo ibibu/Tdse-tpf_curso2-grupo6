@@ -1,0 +1,112 @@
+19:45:02 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-gcc "../app/src/app.c" -mcpu=cortex-m3 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xB -c -I../Core/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I../Drivers/CMSIS/Include -I../app/inc -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"app/src/app.d" -MT"app/src/app.o" --specs=nano.specs -mfloat-abi=soft -mthumb -o "app/src/app.o"
+arm-none-eabi-gcc -o "ADC.elf" @"objects.list"  -lrdimon -mcpu=cortex-m3 -T"C:\Users\ignacio\Desktop\stem\ADC\STM32F103RBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="ADC.map" -Wl,--gc-sections -static -specs=rdimon.specs --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: ADC.elf
+ 
+arm-none-eabi-size  ADC.elf 
+arm-none-eabi-objdump -h -S ADC.elf  > "ADC.list"
+   text	   data	    bss	    dec	    hex	filename
+  31024	    292	   2644	  33960	   84a8	ADC.elf
+Finished building: default.size.stdout
+ 
+Finished building: ADC.list
+ 
+19:45:07 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-size  ADC.elf 
+   text	   data	    bss	    dec	    hex	filename
+  31024	    292	   2644	  33960	   84a8	ADC.elf
+Finished building: default.size.stdout
+ 
+19:50:12 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-gcc "../app/src/app.c" -mcpu=cortex-m3 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xB -c -I../Core/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I../Drivers/CMSIS/Include -I../app/inc -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"app/src/app.d" -MT"app/src/app.o" --specs=nano.specs -mfloat-abi=soft -mthumb -o "app/src/app.o"
+arm-none-eabi-gcc -o "ADC.elf" @"objects.list"  -lrdimon -mcpu=cortex-m3 -T"C:\Users\ignacio\Desktop\stem\ADC\STM32F103RBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="ADC.map" -Wl,--gc-sections -static -specs=rdimon.specs --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: ADC.elf
+ 
+arm-none-eabi-size  ADC.elf 
+arm-none-eabi-objdump -h -S ADC.elf  > "ADC.list"
+   text	   data	    bss	    dec	    hex	filename
+  30456	    292	   2644	  33392	   8270	ADC.elf
+Finished building: default.size.stdout
+ 
+Finished building: ADC.list
+ 
+19:50:27 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-size  ADC.elf 
+   text	   data	    bss	    dec	    hex	filename
+  30456	    292	   2644	  33392	   8270	ADC.elf
+Finished building: default.size.stdout
+ 
+20:01:01 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-gcc "../app/src/app.c" -mcpu=cortex-m3 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xB -c -I../Core/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I../Drivers/CMSIS/Include -I../app/inc -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"app/src/app.d" -MT"app/src/app.o" --specs=nano.specs -mfloat-abi=soft -mthumb -o "app/src/app.o"
+In file included from ../app/src/app.c:8:
+../app/src/app.c: In function 'wcet_dump':
+../app/inc/logger.h:62:26: warning: ' (tick=' directive output truncated writing 7 bytes into a region of size between 0 and 6 [-Wformat-truncation=]
+   62 |         logger_msg_len = snprintf(logger_msg, (LOGGER_CONFIG_MAXLEN - 1), __VA_ARGS__);\
+      |                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../app/src/app.c:167:5: note: in expansion of macro 'LOGGER_LOG'
+  167 |     LOGGER_LOG(
+      |     ^~~~~~~~~~
+../app/inc/logger.h:62:26: note: 'snprintf' output 72 or more bytes (assuming 104) into a destination of size 63
+   62 |         logger_msg_len = snprintf(logger_msg, (LOGGER_CONFIG_MAXLEN - 1), __VA_ARGS__);\
+      |                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../app/src/app.c:167:5: note: in expansion of macro 'LOGGER_LOG'
+  167 |     LOGGER_LOG(
+      |     ^~~~~~~~~~
+arm-none-eabi-gcc -o "ADC.elf" @"objects.list"  -lrdimon -mcpu=cortex-m3 -T"C:\Users\ignacio\Desktop\stem\ADC\STM32F103RBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="ADC.map" -Wl,--gc-sections -static -specs=rdimon.specs --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: ADC.elf
+ 
+arm-none-eabi-size  ADC.elf 
+arm-none-eabi-objdump -h -S ADC.elf  > "ADC.list"
+   text	   data	    bss	    dec	    hex	filename
+  31252	    292	   2868	  34412	   866c	ADC.elf
+Finished building: default.size.stdout
+ 
+Finished building: ADC.list
+ 
+20:01:14 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-size  ADC.elf 
+   text	   data	    bss	    dec	    hex	filename
+  31252	    292	   2868	  34412	   866c	ADC.elf
+Finished building: default.size.stdout
+ 
+20:08:58 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-gcc "../app/src/app.c" -mcpu=cortex-m3 -std=gnu11 -g3 -DDEBUG -DUSE_HAL_DRIVER -DSTM32F103xB -c -I../Core/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc -I../Drivers/STM32F1xx_HAL_Driver/Inc/Legacy -I../Drivers/CMSIS/Device/ST/STM32F1xx/Include -I../Drivers/CMSIS/Include -I../app/inc -O0 -ffunction-sections -fdata-sections -Wall -fstack-usage -fcyclomatic-complexity -MMD -MP -MF"app/src/app.d" -MT"app/src/app.o" --specs=nano.specs -mfloat-abi=soft -mthumb -o "app/src/app.o"
+In file included from ../app/src/app.c:4:
+../app/src/app.c: In function 'wcet_dump':
+../app/inc/logger.h:62:26: warning: ' (tick=' directive output truncated writing 7 bytes into a region of size between 0 and 6 [-Wformat-truncation=]
+   62 |         logger_msg_len = snprintf(logger_msg, (LOGGER_CONFIG_MAXLEN - 1), __VA_ARGS__);\
+      |                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../app/src/app.c:154:5: note: in expansion of macro 'LOGGER_LOG'
+  154 |     LOGGER_LOG(
+      |     ^~~~~~~~~~
+../app/inc/logger.h:62:26: note: 'snprintf' output 72 or more bytes (assuming 104) into a destination of size 63
+   62 |         logger_msg_len = snprintf(logger_msg, (LOGGER_CONFIG_MAXLEN - 1), __VA_ARGS__);\
+      |                          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../app/src/app.c:154:5: note: in expansion of macro 'LOGGER_LOG'
+  154 |     LOGGER_LOG(
+      |     ^~~~~~~~~~
+arm-none-eabi-gcc -o "ADC.elf" @"objects.list"  -lrdimon -mcpu=cortex-m3 -T"C:\Users\ignacio\Desktop\stem\ADC\STM32F103RBTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="ADC.map" -Wl,--gc-sections -static -specs=rdimon.specs --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: ADC.elf
+ 
+arm-none-eabi-size  ADC.elf 
+arm-none-eabi-objdump -h -S ADC.elf  > "ADC.list"
+   text	   data	    bss	    dec	    hex	filename
+  31432	    292	   2868	  34592	   8720	ADC.elf
+Finished building: default.size.stdout
+ 
+Finished building: ADC.list
+ 
+20:12:23 **** Incremental Build of configuration Debug for project ADC ****
+make -j12 all 
+arm-none-eabi-size  ADC.elf 
+   text	   data	    bss	    dec	    hex	filename
+  31432	    292	   2868	  34592	   8720	ADC.elf
+Finished building: default.size.stdout
+ 

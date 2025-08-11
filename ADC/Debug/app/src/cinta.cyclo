@@ -1,0 +1,8 @@
+../app/src/cinta.c:9:6:guardar_cinta_en_eprom	2
+../app/src/cinta.c:20:6:leer_cinta_de_eprom	2
+../app/src/cinta.c:31:6:cinta_cambio	3
+../app/src/cinta.c:38:6:cinta_inicializar	1
+../app/src/cinta.c:46:6:cinta_set_velocidad	1
+../app/src/cinta.c:51:6:cinta_set_modo	2
+../app/src/cinta.c:62:8:cinta_get_velocidad	1
+../app/src/cinta.c:67:8:cinta_get_modo	1

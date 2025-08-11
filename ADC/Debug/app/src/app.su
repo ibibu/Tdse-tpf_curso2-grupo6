@@ -1,0 +1,11 @@
+../app/src/app.c:33:13:actuadores_init_adapter	16	static
+../app/src/app.c:34:13:actuadores_update_adapter	16	static
+../app/src/app.c:59:20:dwt_init	4	static
+../app/src/app.c:65:24:dwt_get_cycles	4	static
+../app/src/app.c:66:24:cycles_to_us	64	static
+../app/src/app.c:82:24:systick_period_us_reg	64	static
+../app/src/app.c:98:13:app_cpu_snapshot_log	80	static,ignoring_inline_asm
+../app/src/app.c:111:13:wcet_dump	184	static,ignoring_inline_asm
+../app/src/app.c:170:6:app_init	24	static,ignoring_inline_asm
+../app/src/app.c:188:6:app_update	208	static
+../app/src/app.c:258:6:HAL_SYSTICK_Callback	4	static

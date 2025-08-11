@@ -1,0 +1,112 @@
+/*
+ * Tarea "sistema": Display + temperaturas no bloqueantes.
+ *
+ * - Interna: ADC1 / TEMPSENSOR  -> °C reales
+ * - Externa: ADC2 / PA0 (CH0)   -> mapeo 0..100 "grados" desde el potenciómetro
+ *
+ * LCD 20x4:
+ *  - Línea 0: MODO (placeholder)
+ *  - Línea 3: TIn y TEx (sin usar %f)
+ */
+
+#include "main.h"
+#include "display.h"
+#include "sen_temp.h"
+#include "logger.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>   // abs()
+
+/* ADCs generados por CubeMX (definidos en main.c) */
+extern ADC_HandleTypeDef hadc1;   // ADC1: interno
+extern ADC_HandleTypeDef hadc2;   // ADC2: externo (PA0 -> CH0)
+
+/* -------------------- Helpers de LCD -------------------- */
+static char s_line[21];  // 20 columnas + '\0'
+
+static void lcd_print_padded(uint8_t col, uint8_t row, const char* txt)
+{
+    displayCharPositionWrite(col, row);
+    memset(s_line, ' ', 20);
+    s_line[20] = '\0';
+    size_t n = strlen(txt);
+    if (n > 20) n = 20;
+    memcpy(s_line, txt, n);
+    displayStringWrite(s_line);
+}
+
+/* -------------------- Estado local -------------------- */
+static uint32_t s_next_lcd_tick = 0;
+#define LCD_PERIOD_MS  200u
+
+static float s_tin = 0.0f;      // °C (interna)
+static float s_tex = 0.0f;      // 0..100 (externa pot)
+
+/* Placeholder: reemplazá por tu estado real si tenés módulo de modos/velocidad */
+static const char* modo_to_str(void)
+{
+    return "MODO: ---";
+}
+
+/* -------------------- API de la tarea -------------------- */
+void task_sistema_init(void *params)
+{
+    /* Inicializa el display */
+    displayInit();
+
+    /* Mensaje de arranque */
+    lcd_print_padded(0, 0, "Sistema listo");
+
+    /* Inicializa medición NO bloqueante:
+       - Interna: ADC1 / TEMPSENSOR
+       - Externa: ADC2 / PA0 (ADC_CHANNEL_0)
+       - Periodo: 100 ms
+       - VDDA: 3.30 V
+    */
+    sen_temp_init(&hadc1, &hadc2,
+                  ADC_CHANNEL_0,   // canal externo (PA0 en ADC2)
+                  100,             // periodo en ms
+                  3.30f);          // VDDA
+
+    /* Primer refresco inmediato */
+    s_next_lcd_tick = HAL_GetTick();
+}
+
+void task_sistema_update(void *params)
+{
+    /* Avanzar medición NO bloqueante */
+    sen_temp_update();
+
+    /* Tomar últimos datos si hay novedades */
+    float t;
+    if (sen_temp_get_internal(&t))  { s_tin = t; }
+    if (sen_temp_get_external(&t))  { s_tex = t; }   // ya viene 0..100
+
+    /* Refresco de pantalla sin bloquear */
+    uint32_t now = HAL_GetTick();
+    if ((int32_t)(now - s_next_lcd_tick) >= 0)
+    {
+        /* Línea 0: MODO */
+        lcd_print_padded(0, 0, modo_to_str());
+
+        /* Línea 3: TIn (°C, 1 decimal) y TEx (0..100 "grados")
+           SIN usar %f: fixed-point con 1 decimal para Tin */
+        int tin10 = (int)(s_tin * 10.0f + (s_tin >= 0 ? 0.5f : -0.5f)); // redondeo a décima
+        int tex   = (int)(s_tex + 0.5f);                                // 0..100 enteros
+
+        char buf[32];
+        snprintf(buf, sizeof(buf), "TIn:%3d.%01dC TEx:%3dC",
+                 tin10/10, abs(tin10%10),
+                 tex);
+        lcd_print_padded(0, 3, buf);
+
+        /* (Opcional) log sin %f
+        LOGGER_LOG("TIn=%d.%dC TEx=%dC\r\n",
+                   tin10/10, abs(tin10%10), tex);
+        */
+
+        s_next_lcd_tick = now + LCD_PERIOD_MS;
+    }
+
+    /* Acá podés integrar botones/velocidad/EEPROM sin bloquear si lo necesitás */
+}

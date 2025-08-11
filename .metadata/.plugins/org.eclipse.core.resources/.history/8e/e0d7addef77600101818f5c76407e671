@@ -1,0 +1,109 @@
+/*
+ * Aplicación principal (scheduler simple por tareas)
+ * Registra: task_sensor (botones) y task_sistema (display + temperaturas no bloqueantes)
+ * Inicializa el módulo de temperatura (TIn/TEx) en app_init (opción B).
+ */
+
+#include "main.h"
+#include "logger.h"
+#include "sen_temp.h"    // <<< agregado: módulo de temperaturas (ADC1 interno + ADC2 externo)
+
+/* ADCs generados por CubeMX */
+extern ADC_HandleTypeDef hadc1;   // ADC1: sensor interno de temperatura
+extern ADC_HandleTypeDef hadc2;   // ADC2: externo (pot en PA0 -> ADC_CHANNEL_0)
+
+/* Declaraciones de tareas existentes / nuevas */
+void task_sensor_init(void *params);
+void task_sensor_update(void *params);
+
+void task_sistema_init(void *params);
+void task_sistema_update(void *params);
+
+/********************** Definiciones y macros ********************************/
+#define G_APP_CNT_INI       0ul
+#define G_APP_TICK_CNT_INI  0ul
+
+/* Estructura para configuración de tareas */
+typedef struct {
+    void (*task_init)(void *);       // Puntero a función init
+    void (*task_update)(void *);     // Puntero a función update
+    void *parameters;                // Puntero a parámetros
+} task_cfg_t;
+
+/********************** Configuración de tareas *******************************/
+static const task_cfg_t task_cfg_list[] = {
+    {task_sensor_init,  task_sensor_update,  NULL},  // Tarea: botones
+    {task_sistema_init, task_sistema_update, NULL},  // Tarea: display + TIn/TEx
+};
+
+#define TASK_QTY (sizeof(task_cfg_list)/sizeof(task_cfg_t))
+
+/********************** Variables globales ***********************************/
+uint32_t g_app_cnt;                  // Contador principal de ciclos
+volatile uint32_t g_app_tick_cnt;    // Contador de ticks para disparar update
+
+/********************** Implementación de funciones **************************/
+
+/**
+ * @brief Inicializa la aplicación y todas las tareas registradas.
+ */
+void app_init(void)
+{
+    uint32_t index;
+
+    LOGGER_LOG("\r\n");
+    LOGGER_LOG("Iniciando aplicación - Tick [ms] = %lu\r\n", HAL_GetTick());
+
+    g_app_cnt = G_APP_CNT_INI;
+
+    /* <<< Inicialización del módulo de temperatura (opción B) >>>
+       - Interna: ADC1/TEMPSENSOR (°C reales)
+       - Externa: ADC2/PA0 (ADC_CHANNEL_0) mapeada 0..100 con Vref=3.30V
+       NOTA: Ajustá ADC_CHANNEL_0 si tu pot está en otro canal de ADC2. */
+    sen_temp_init(&hadc1, &hadc2, ADC_CHANNEL_0, 100, 3.30f);
+
+    LOGGER_LOG("Cantidad de tareas: %u\r\n", (unsigned)TASK_QTY);
+
+    /* Inicializamos todas las tareas */
+    for (index = 0; index < TASK_QTY; index++)
+    {
+        if (task_cfg_list[index].task_init != NULL)
+        {
+            task_cfg_list[index].task_init(task_cfg_list[index].parameters);
+        }
+    }
+}
+
+/**
+ * @brief Actualiza el sistema ejecutando las tareas cuando hay un tick disponible.
+ */
+void app_update(void)
+{
+    uint32_t index;
+
+    /* Ejecutar solo si hay tick pendiente */
+    if (G_APP_TICK_CNT_INI < g_app_tick_cnt)
+    {
+        g_app_tick_cnt--;
+
+        /* Actualizamos contador de ciclos */
+        g_app_cnt++;
+
+        /* Recorremos todas las tareas */
+        for (index = 0; index < TASK_QTY; index++)
+        {
+            if (task_cfg_list[index].task_update != NULL)
+            {
+                task_cfg_list[index].task_update(task_cfg_list[index].parameters);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Callback de SysTick: incrementa el contador para disparar las tareas.
+ */
+void HAL_SYSTICK_Callback(void)
+{
+    g_app_tick_cnt++;
+}

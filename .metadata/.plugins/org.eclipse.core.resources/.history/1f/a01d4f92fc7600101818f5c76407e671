@@ -1,0 +1,139 @@
+#include "display.h"
+#include "main.h"
+#include <stdbool.h>
+#include <string.h>
+
+// Delay en microsegundos usando DWT
+static inline void delay_us(uint32_t us) {
+    uint32_t start = DWT->CYCCNT;
+    uint32_t ticks = (SystemCoreClock/1000000U) * us;
+    while ((DWT->CYCCNT - start) < ticks) { __NOP(); }
+}
+
+static display_t display;
+static bool initial8BitCommunicationIsCompleted;
+
+static void displayPinWrite(uint8_t pinName, int value);
+static void displayDataBusWrite(uint8_t dataByte);
+static void displayCodeWrite(bool type, uint8_t dataBus);
+
+void displayInit()
+{
+    display.connection = DISPLAY_CONNECTION_GPIO_4BITS;
+    initial8BitCommunicationIsCompleted = false;
+
+    delay_us(15000); // >15ms tras Vcc
+
+    // 3 veces modo 8 bits
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_FUNCTION_SET | LCD_CMD_FUNCTION_SET_8BITS);
+    delay_us(4100);
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_FUNCTION_SET | LCD_CMD_FUNCTION_SET_8BITS);
+    delay_us(100);
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_FUNCTION_SET | LCD_CMD_FUNCTION_SET_8BITS);
+    delay_us(40);
+
+    // Modo 4 bits
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_FUNCTION_SET | LCD_CMD_FUNCTION_SET_4BITS);
+    delay_us(40);
+    initial8BitCommunicationIsCompleted = true;
+
+    // Configuración
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_FUNCTION_SET |
+                     LCD_CMD_FUNCTION_SET_4BITS |
+                     LCD_CMD_FUNCTION_SET_2LINES |
+                     LCD_CMD_FUNCTION_SET_5x8DOTS);
+    delay_us(40);
+
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_DISPLAY_CTRL |
+                     LCD_CMD_DISPLAY_CTRL_DISPLAY_OFF |
+                     LCD_CMD_DISPLAY_CTRL_CURSOR_OFF |
+                     LCD_CMD_DISPLAY_CTRL_BLINK_OFF);
+    delay_us(40);
+
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_CLEAR);
+    delay_us(1600);
+
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_ENTRY_MODE |
+                     LCD_CMD_ENTRY_MODE_SET_INCREMENT |
+                     LCD_CMD_ENTRY_MODE_SET_NO_SHIFT);
+    delay_us(40);
+
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_DISPLAY_CTRL |
+                     LCD_CMD_DISPLAY_CTRL_DISPLAY_ON |
+                     LCD_CMD_DISPLAY_CTRL_CURSOR_OFF |
+                     LCD_CMD_DISPLAY_CTRL_BLINK_OFF);
+    delay_us(40);
+}
+
+void displayCharPositionWrite(uint8_t charPositionX, uint8_t charPositionY)
+{
+    uint8_t addr = 0;
+    switch (charPositionY) {
+        case 0: addr = LCD_20X4_LINE1_DDRAM_ADDR; break;
+        case 1: addr = LCD_20X4_LINE2_DDRAM_ADDR; break;
+        case 2: addr = LCD_20X4_LINE3_DDRAM_ADDR; break;
+        case 3: addr = LCD_20X4_LINE4_DDRAM_ADDR; break;
+    }
+    displayCodeWrite(LCD_RS_COMMAND, LCD_CMD_SET_DDRAM_ADDR | (addr + charPositionX));
+    delay_us(40);
+}
+
+void displayStringWrite(const char *str)
+{
+    while (*str) {
+        displayCodeWrite(LCD_RS_DATA, *str++);
+        delay_us(40);
+    }
+}
+
+static void displayCodeWrite(bool type, uint8_t dataBus)
+{
+    if (type == LCD_RS_COMMAND)
+        displayPinWrite(LCD_PIN_RS, LCD_RS_COMMAND);
+    else
+        displayPinWrite(LCD_PIN_RS, LCD_RS_DATA);
+
+    displayPinWrite(LCD_PIN_RW, LCD_RW_WRITE);
+    displayDataBusWrite(dataBus);
+}
+
+static void displayPinWrite(uint8_t pinName, int value)
+{
+    switch (pinName) {
+        case LCD_PIN_D4: HAL_GPIO_WritePin(GPIOA, GPIO_PIN_10, value); break;
+        case LCD_PIN_D5: HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8, value);  break;
+        case LCD_PIN_D6: HAL_GPIO_WritePin(GPIOA, GPIO_PIN_9, value);  break;
+        case LCD_PIN_D7: HAL_GPIO_WritePin(GPIOC, GPIO_PIN_7, value);  break;
+        case LCD_PIN_RS: HAL_GPIO_WritePin(GPIOB, GPIO_PIN_6, value);  break;
+        case LCD_PIN_EN: HAL_GPIO_WritePin(GPIOA, GPIO_PIN_7, value);  break;
+        case LCD_PIN_RW: break;
+        default: break;
+    }
+}
+
+static void displayDataBusWrite(uint8_t dataBus)
+{
+    // Nibble alto
+    displayPinWrite(LCD_PIN_D7, dataBus & 0x80);
+    displayPinWrite(LCD_PIN_D6, dataBus & 0x40);
+    displayPinWrite(LCD_PIN_D5, dataBus & 0x20);
+    displayPinWrite(LCD_PIN_D4, dataBus & 0x10);
+
+    displayPinWrite(LCD_PIN_EN, ON);
+    delay_us(2);
+    displayPinWrite(LCD_PIN_EN, OFF);
+    delay_us(2);
+
+    // Nibble bajo
+    if (initial8BitCommunicationIsCompleted) {
+        displayPinWrite(LCD_PIN_D7, dataBus & 0x08);
+        displayPinWrite(LCD_PIN_D6, dataBus & 0x04);
+        displayPinWrite(LCD_PIN_D5, dataBus & 0x02);
+        displayPinWrite(LCD_PIN_D4, dataBus & 0x01);
+
+        displayPinWrite(LCD_PIN_EN, ON);
+        delay_us(2);
+        displayPinWrite(LCD_PIN_EN, OFF);
+        delay_us(2);
+    }
+}

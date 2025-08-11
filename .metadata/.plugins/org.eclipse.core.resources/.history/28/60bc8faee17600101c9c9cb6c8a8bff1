@@ -1,0 +1,157 @@
+#include "sen_temp.h"
+#include "logger.h"
+
+/* ---------- Constantes (STM32F1) ---------- */
+#define V25           1.43f          /* Vsense a 25°C */
+#define AVG_SLOPE     0.0043f        /* 4.3 mV/°C */
+#define ADC_FS        4095.0f
+
+/* ---------- Estado interno del módulo ---------- */
+static ADC_HandleTypeDef *s_hadc_int = NULL;    // ADC1 (sensor interno)
+static ADC_HandleTypeDef *s_hadc_ext = NULL;    // ADC2 (sensor externo)
+static uint32_t           s_ext_chan = ADC_CHANNEL_1;
+static uint32_t           s_period_ms = 100;
+static float              s_vdda = 3.3f;
+
+static volatile float s_t_int = 0.0f, s_t_ext = 0.0f;
+static volatile bool  s_new_int = false, s_new_ext = false;
+
+typedef enum { ST_IDLE, ST_START_INT, ST_WAIT_INT, ST_START_EXT, ST_WAIT_EXT } sm_t;
+static sm_t s_state = ST_IDLE;
+static uint32_t s_next_tick = 0;
+
+/* ---------- Helpers ---------- */
+static bool start_adc_it(ADC_HandleTypeDef *hadc, uint32_t channel, uint32_t sample_time)
+{
+    if (!hadc) return false;
+
+    ADC_ChannelConfTypeDef cfg = {0};
+    cfg.Channel      = channel;
+    cfg.Rank         = ADC_REGULAR_RANK_1;
+    cfg.SamplingTime = sample_time;
+
+    if (HAL_ADC_ConfigChannel(hadc, &cfg) != HAL_OK)
+        return false;
+    if (HAL_ADC_Start_IT(hadc) != HAL_OK)
+        return false;
+
+    return true;
+}
+
+/* ---------- API ---------- */
+void sen_temp_init(ADC_HandleTypeDef *hadc_int,
+                   ADC_HandleTypeDef *hadc_ext,
+                   uint32_t ext_chan,
+                   uint32_t period_ms,
+                   float vdda)
+{
+    s_hadc_int  = hadc_int;
+    s_hadc_ext  = hadc_ext;
+    s_ext_chan  = ext_chan;
+    s_period_ms = (period_ms == 0) ? 100 : period_ms;
+    if (vdda > 2.4f && vdda < 3.6f) s_vdda = vdda;
+
+    s_t_int = s_t_ext = 0.0f;
+    s_new_int = s_new_ext = false;
+    s_state = ST_IDLE;
+    s_next_tick = HAL_GetTick();  // arranca ya
+
+    /* En CubeMX:
+       - ADC1: habilitar "Temperature sensor channel" (TSVREFE).
+       - Sample time del interno: 239.5 cycles (>=17us).
+       - ADC2: configurar el canal del sensor externo.
+    */
+}
+
+void sen_temp_set_vdda(float vdda)
+{
+    if (vdda > 2.4f && vdda < 3.6f) s_vdda = vdda;
+}
+
+void sen_temp_update(void)
+{
+    uint32_t now = HAL_GetTick();
+
+    switch (s_state)
+    {
+    case ST_IDLE:
+        if ((int32_t)(now - s_next_tick) >= 0)
+            s_state = ST_START_INT;
+        break;
+
+    case ST_START_INT:
+        /* Interno: usar sample time largo */
+        if (start_adc_it(s_hadc_int, ADC_CHANNEL_TEMPSENSOR, ADC_SAMPLETIME_239CYCLES_5))
+            s_state = ST_WAIT_INT;
+        else
+            s_state = ST_START_EXT; // intentar externa aunque interna falle
+        break;
+
+    case ST_WAIT_INT:
+        /* La ISR completará y pasará a START_EXT */
+        break;
+
+    case ST_START_EXT:
+        /* Externo: sample time medio/alto según sensor/capacitancia */
+        if (start_adc_it(s_hadc_ext, s_ext_chan, ADC_SAMPLETIME_71CYCLES_5))
+            s_state = ST_WAIT_EXT;
+        else {
+            s_next_tick = now + s_period_ms;
+            s_state = ST_IDLE;
+        }
+        break;
+
+    case ST_WAIT_EXT:
+        /* La ISR completará y volverá a IDLE */
+        break;
+    }
+}
+
+/* Devuelven true si había dato nuevo; el flag se consume */
+bool sen_temp_get_internal(float *t_c)
+{
+    if (!t_c) return false;
+    bool had = s_new_int;
+    s_new_int = false;
+    *t_c = s_t_int;
+    return had;
+}
+
+bool sen_temp_get_external(float *t_c)
+{
+    if (!t_c) return false;
+    bool had = s_new_ext;
+    s_new_ext = false;
+    *t_c = s_t_ext;
+    return had;
+}
+
+/* ---------- ISR de conversión ADC (HAL) ----------
+   Nota: si tenés otro callback en otro módulo, unificalos en uno solo
+   y encaminá por 'hadc' a cada lógica. */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+    uint16_t raw = HAL_ADC_GetValue(hadc);
+
+    if (hadc == s_hadc_int && (s_state == ST_WAIT_INT))
+    {
+        /* T(°C) = (V25 - Vsense)/AVG_SLOPE + 25, Vsense = raw*VDDA/4095 */
+        float Vsense = (raw * s_vdda) / ADC_FS;
+        s_t_int = ((V25 - Vsense) / AVG_SLOPE) + 25.0f;
+        s_new_int = true;
+
+        /* Seguir con externa */
+        s_state = ST_START_EXT;
+    }
+    else if (hadc == s_hadc_ext && (s_state == ST_WAIT_EXT))
+    {
+        /* Externo por defecto: LM35 (10 mV/°C, sin divisor) */
+        float vout = (raw * s_vdda) / ADC_FS;
+        s_t_ext = vout / 0.010f;
+        s_new_ext = true;
+
+        /* Cierra ciclo y agenda próximo período */
+        s_next_tick = HAL_GetTick() + s_period_ms;
+        s_state = ST_IDLE;
+    }
+}

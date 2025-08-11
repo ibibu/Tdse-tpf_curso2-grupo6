@@ -1,0 +1,40 @@
+#ifndef SEN_TEMP_H
+#define SEN_TEMP_H
+
+#include "stm32f1xx_hal.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Inicializa medición no bloqueante de temperatura.
+ * hadc_int   : ADC para sensor interno (típicamente &hadc1).
+ * hadc_ext   : ADC para sensor externo (típicamente &hadc2). Puede ser NULL si no hay externo.
+ * chan_int   : canal del sensor interno (usar ADC_CHANNEL_TEMPSENSOR).
+ * chan_ext   : canal del sensor externo (p.ej. ADC_CHANNEL_0 para PA0).
+ * period_ms  : periodo entre mediciones (recomendado >= 50 ms).
+ * vdda       : VDDA en volts (si 0 => usa 3.3 V por defecto).
+ */
+void sen_temp_init(ADC_HandleTypeDef *hadc_int,
+                   ADC_HandleTypeDef *hadc_ext,
+                   uint32_t chan_int,
+                   uint32_t chan_ext,
+                   uint32_t period_ms,
+                   float vdda);
+
+/* Llamar periódicamente. Dispara conversiones cuando corresponde. */
+void sen_temp_update(void);
+
+/* Devuelven true si hay dato nuevo (y lo “consumen”). °C en *t_c */
+bool sen_temp_get_internal(float *t_c);
+bool sen_temp_get_external(float *t_c);
+
+/* Opcional: actualizar VDDA si la medís con Vrefint */
+void sen_temp_set_vdda(float vdda);
+
+#ifdef __cplusplus
+}
+#endif
+#endif /* SEN_TEMP_H */

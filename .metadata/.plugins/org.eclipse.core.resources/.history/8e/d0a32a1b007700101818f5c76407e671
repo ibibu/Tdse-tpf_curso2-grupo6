@@ -1,0 +1,202 @@
+/*
+ * app.c — Scheduler + WCET por tarea (sensor, actuador, sistema)
+ * - Mide tiempo por tarea con DWT->CYCCNT y guarda last/wcet en task_prof[].
+ * - Vuelca periódicamente por LOGGER_LOG los tiempos por tarea y el total.
+ */
+
+#include "main.h"
+#include "logger.h"
+
+#include <task_sensor_temperature.h>   // sen_temp_init / update
+#include "task_actuator.h"             // actuadores_init / actuadores_update
+
+/* ===== Tareas ===== */
+void task_sensor_init(void *params);
+void task_sensor_update(void *params);
+
+void task_sistema_init(void *params);
+void task_sistema_update(void *params);
+
+/* ===== ADCs generados por CubeMX ===== */
+extern ADC_HandleTypeDef hadc1;   // ADC1: sensor interno
+extern ADC_HandleTypeDef hadc2;   // ADC2: externo (p.ej. PA0)
+
+/********************** Definiciones y macros ********************************/
+#define G_APP_CNT_INI         0ul
+#define G_APP_TICK_CNT_INI    0ul
+
+/* Estructura de configuración de tareas */
+typedef struct {
+    const char *name;              // Nombre para profiling
+    void (*task_init)(void *);     // Init
+    void (*task_update)(void *);   // Update
+    void *parameters;              // Params
+} task_cfg_t;
+
+/* Adapters para actuadores (no usan void*) */
+static void actuadores_init_adapter(void *p){ (void)p; actuadores_init(); }
+static void actuadores_update_adapter(void *p){ (void)p; actuadores_update(); }
+
+/********************** Configuración de tareas *******************************/
+static const task_cfg_t task_cfg_list[] = {
+    { "task_sensor",    task_sensor_init,           task_sensor_update,           NULL },   // Botones
+    { "task_actuador",  actuadores_init_adapter,    actuadores_update_adapter,    NULL },   // LEDs
+    { "task_sistema",   task_sistema_init,          task_sistema_update,          NULL },   // Display + lógica + T°
+};
+#define TASK_QTY (sizeof(task_cfg_list)/sizeof(task_cfg_t))
+
+/********************** Profiling (WCET) *************************************/
+typedef struct {
+    const char *name;
+    uint32_t    last_cycles;
+    uint32_t    wcet_cycles;
+    uint32_t    last_us;
+    uint32_t    wcet_us;
+    uint32_t    calls;
+} task_prof_t;
+
+/* Arreglo global de perfiles por tarea (útil para Live Expressions) */
+volatile task_prof_t task_prof[TASK_QTY];
+
+/* Acumulado total por tick */
+volatile task_prof_t task_prof_total = {
+    .name = "TOTAL_TICK",
+    .last_cycles = 0,
+    .wcet_cycles = 0,
+    .last_us = 0,
+    .wcet_us = 0,
+    .calls = 0
+};
+
+/* ======= Helpers DWT ======= */
+static inline void dwt_init(void)
+{
+    /* Habilitar DWT y su contador de ciclos */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;   // Trace enable
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;              // CYCCNT enable
+}
+static inline uint32_t dwt_get_cycles(void) { return DWT->CYCCNT; }
+static inline uint32_t cycles_to_us(uint32_t cycles)
+{
+    /* Conversión segura a us (usa 64 bits intermedio) */
+    return (uint32_t)(((uint64_t)cycles * 1000000ull) / (uint64_t)SystemCoreClock);
+}
+
+/********************** Variables globales ***********************************/
+uint32_t g_app_cnt;                  // Contador principal de ciclos
+volatile uint32_t g_app_tick_cnt;    // Contador de ticks del scheduler
+
+/* ===== Dump WCET por semihosting cada N ticks ===== */
+static uint32_t s_prof_dump_every = 100;  // cada 100 ticks
+static uint32_t s_prof_tick = 0;
+
+/* (Opcional) dump extra de secciones internas de task_sistema */
+void task_sistema_prof_dump(void);   // Si no lo tenés implementado, podés comentarlo
+
+static void wcet_dump(void)
+{
+    LOGGER_LOG("\r\n--- WCET por tarea (us) ---\r\n");
+    for (uint32_t i = 0; i < TASK_QTY; i++) {
+        LOGGER_LOG("%s: last=%lu us, wcet=%lu us, calls=%lu\r\n",
+                   task_prof[i].name,
+                   (unsigned long)task_prof[i].last_us,
+                   (unsigned long)task_prof[i].wcet_us,
+                   (unsigned long)task_prof[i].calls);
+    }
+    LOGGER_LOG("TOTAL_TICK: last=%lu us, wcet=%lu us, calls=%lu\r\n",
+               (unsigned long)task_prof_total.last_us,
+               (unsigned long)task_prof_total.wcet_us,
+               (unsigned long)task_prof_total.calls);
+
+    /* Si instrumentaste secciones en task_sistema.c, esto imprime su WCET interno */
+    task_sistema_prof_dump();
+}
+
+/********************** Implementación de funciones **************************/
+
+void app_init(void)
+{
+    LOGGER_LOG("\r\n");
+    LOGGER_LOG("Iniciando aplicación - Tick [ms] = %lu\r\n", HAL_GetTick());
+
+    g_app_cnt = G_APP_CNT_INI;
+
+    /* Inicializar DWT para medir ciclos */
+    dwt_init();
+
+    /* Inicialización del módulo de temperatura a 50 ms (match con UI) */
+    sen_temp_init(&hadc1, &hadc2, ADC_CHANNEL_0, 50, 3.30f);
+
+    LOGGER_LOG("Cantidad de tareas: %u\r\n", (unsigned)TASK_QTY);
+
+    /* Inicializar profiling y tareas */
+    for (uint32_t i = 0; i < TASK_QTY; i++) {
+        task_prof[i].name        = task_cfg_list[i].name;
+        task_prof[i].last_cycles = 0;
+        task_prof[i].wcet_cycles = 0;
+        task_prof[i].last_us     = 0;
+        task_prof[i].wcet_us     = 0;
+        task_prof[i].calls       = 0;
+
+        if (task_cfg_list[i].task_init != NULL) {
+            task_cfg_list[i].task_init(task_cfg_list[i].parameters);
+        }
+    }
+}
+
+void app_update(void)
+{
+    if (G_APP_TICK_CNT_INI < g_app_tick_cnt) {
+        g_app_tick_cnt--;
+        g_app_cnt++;
+
+        /* Medición total del tick */
+        uint32_t tick_start = dwt_get_cycles();
+
+        /* Ejecutar tareas con profiling */
+        for (uint32_t i = 0; i < TASK_QTY; i++) {
+            if (task_cfg_list[i].task_update != NULL) {
+                uint32_t t0 = dwt_get_cycles();
+
+                task_cfg_list[i].task_update(task_cfg_list[i].parameters);
+
+                uint32_t dt_cycles = dwt_get_cycles() - t0;
+                uint32_t dt_us     = cycles_to_us(dt_cycles);
+
+                task_prof[i].last_cycles = dt_cycles;
+                task_prof[i].last_us     = dt_us;
+                task_prof[i].calls++;
+
+                if (dt_cycles > task_prof[i].wcet_cycles) {
+                    task_prof[i].wcet_cycles = dt_cycles;
+                    task_prof[i].wcet_us     = dt_us;
+                }
+            }
+        }
+
+        /* Cerrar medición total del tick */
+        uint32_t tick_dt_cycles = dwt_get_cycles() - tick_start;
+        uint32_t tick_dt_us     = cycles_to_us(tick_dt_cycles);
+
+        task_prof_total.last_cycles = tick_dt_cycles;
+        task_prof_total.last_us     = tick_dt_us;
+        task_prof_total.calls++;
+
+        if (tick_dt_cycles > task_prof_total.wcet_cycles) {
+            task_prof_total.wcet_cycles = tick_dt_cycles;
+            task_prof_total.wcet_us     = tick_dt_us;
+        }
+
+        /* Volcado periódico por semihosting */
+        if ((++s_prof_tick % s_prof_dump_every) == 0) {
+            wcet_dump();
+        }
+    }
+}
+
+/* SysTick incrementa el contador de ticks del scheduler */
+void HAL_SYSTICK_Callback(void)
+{
+    g_app_tick_cnt++;
+}

@@ -1,0 +1,7 @@
+../app/src/task_sensor_temperature.c:26:13:start_adc_it	4
+../app/src/task_sensor_temperature.c:40:6:sen_temp_init	3
+../app/src/task_sensor_temperature.c:65:6:sen_temp_set_vdda	3
+../app/src/task_sensor_temperature.c:70:6:sen_temp_update	9
+../app/src/task_sensor_temperature.c:115:6:sen_temp_get_internal	2
+../app/src/task_sensor_temperature.c:124:6:sen_temp_get_external	2
+../app/src/task_sensor_temperature.c:134:6:HAL_ADC_ConvCpltCallback	5

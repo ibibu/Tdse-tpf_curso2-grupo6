@@ -1,0 +1,9 @@
+../app/src/task_system.c:14:24:dwt_cycles	4	static
+../app/src/task_system.c:15:24:cycles_to_us	64	static
+../app/src/task_system.c:36:20:sec_start	16	static
+../app/src/task_system.c:37:20:sec_end	24	static
+../app/src/task_system.c:64:13:guardar_configuracion	16	static
+../app/src/task_system.c:73:13:leer_configuracion	16	static
+../app/src/task_system.c:101:6:task_sistema_init	16	static
+../app/src/task_system.c:118:6:task_sistema_update	136	static
+../app/src/task_system.c:250:6:task_sistema_prof_get	16	static

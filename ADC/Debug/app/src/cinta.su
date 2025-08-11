@@ -1,0 +1,8 @@
+../app/src/cinta.c:9:6:guardar_cinta_en_eprom	24	static
+../app/src/cinta.c:20:6:leer_cinta_de_eprom	24	static
+../app/src/cinta.c:31:6:cinta_cambio	16	static
+../app/src/cinta.c:38:6:cinta_inicializar	16	static
+../app/src/cinta.c:46:6:cinta_set_velocidad	16	static
+../app/src/cinta.c:51:6:cinta_set_modo	16	static
+../app/src/cinta.c:62:8:cinta_get_velocidad	16	static
+../app/src/cinta.c:67:8:cinta_get_modo	16	static

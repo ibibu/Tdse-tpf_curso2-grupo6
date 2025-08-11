@@ -1,0 +1,252 @@
+/*
+ * app.c — Scheduler + WCET por tarea (nombres = archivo .c)
+ * + WCET por categorías (sensores/actuadores/sistema)
+ * + Factor de uso de CPU (inst/EMA/max) por tick
+ */
+
+#include "main.h"
+#include "logger.h"
+#include <string.h>
+
+#include <task_sensor_temperature.h>   // sen_temp_init / update
+#include "task_actuator.h"             // actuadores_init / actuadores_update
+#include "task_system.h"               // task_sistema_* y task_sistema_prof_get()
+
+/* ===== Tareas ===== */
+void task_sensor_init(void *params);
+void task_sensor_update(void *params);
+
+void task_sistema_init(void *params);
+void task_sistema_update(void *params);
+
+/* ===== ADCs generados por CubeMX ===== */
+extern ADC_HandleTypeDef hadc1;   // ADC1: sensor interno
+extern ADC_HandleTypeDef hadc2;   // ADC2: externo (p.ej. PA0)
+
+/********************** Definiciones y macros ********************************/
+#define G_APP_CNT_INI         0ul
+#define G_APP_TICK_CNT_INI    0ul
+
+typedef struct {
+    const char *name;              // nombre que aparece en el WCET
+    void (*task_init)(void *);     // init
+    void (*task_update)(void *);   // update
+    void *parameters;              // params
+} task_cfg_t;
+
+/* Adapters para actuadores (no usan void*) */
+static void actuadores_init_adapter(void *p){ (void)p; actuadores_init(); }
+static void actuadores_update_adapter(void *p){ (void)p; actuadores_update(); }
+
+/********************** Configuración de tareas *******************************/
+static const task_cfg_t task_cfg_list[] = {
+    { "task_sensor.c",    task_sensor_init,           task_sensor_update,           NULL },
+    { "task_actuator.c",  actuadores_init_adapter,    actuadores_update_adapter,    NULL },
+    { "task_system.c",    task_sistema_init,          task_sistema_update,          NULL },
+};
+#define TASK_QTY (sizeof(task_cfg_list)/sizeof(task_cfg_t))
+
+/********************** Profiling (WCET) *************************************/
+typedef struct {
+    const char *name;
+    uint32_t    last_cycles;
+    uint32_t    wcet_cycles;
+    uint32_t    last_us;
+    uint32_t    wcet_us;
+    uint32_t    calls;
+} task_prof_t;
+
+volatile task_prof_t task_prof[TASK_QTY];
+
+volatile task_prof_t task_prof_total = {
+    .name = "TOTAL_TICK",
+    .last_cycles = 0,
+    .wcet_cycles = 0,
+    .last_us = 0,
+    .wcet_us = 0,
+    .calls = 0
+};
+
+/********************** DWT helpers ******************************************/
+static inline void dwt_init(void)
+{
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+static inline uint32_t dwt_get_cycles(void) { return DWT->CYCCNT; }
+static inline uint32_t cycles_to_us(uint32_t cycles)
+{
+    return (uint32_t)(((uint64_t)cycles * 1000000ull) / (uint64_t)SystemCoreClock);
+}
+
+/********************** CPU usage ********************************************/
+/* uso instantáneo / promedio (EMA) / máximo por WCET */
+static float cpu_use_inst_pct = 0.0f;
+static float cpu_use_ema_pct  = 0.0f;
+static float cpu_use_max_pct  = 0.0f;
+static const float CPU_EMA_ALPHA = 0.1f;
+
+/* periodo de SysTick en microsegundos (no asumas 1ms) */
+static inline uint32_t systick_period_us(void) {
+    uint32_t clk_div = (SysTick->CTRL & SysTick_CTRL_CLKSOURCE_Msk) ? 1u : 8u;
+    uint32_t reload  = (SysTick->LOAD + 1u);
+    uint64_t hz = (uint64_t)SystemCoreClock / clk_div;
+    return (uint32_t)(( (uint64_t)reload * 1000000ull) / hz);
+}
+
+/********************** Variables globales ***********************************/
+uint32_t g_app_cnt;
+volatile uint32_t g_app_tick_cnt;
+
+/********************** Dump periódico ****************************************/
+static uint32_t s_prof_dump_every = 100;  // cada 100 ticks
+static uint32_t s_prof_tick = 0;
+
+static void wcet_dump(void)
+{
+    /* 1) Dump por tarea */
+    LOGGER_LOG("\r\n--- WCET por tarea (us) ---\r\n");
+    for (uint32_t i = 0; i < TASK_QTY; i++) {
+        LOGGER_LOG("%s: last=%lu us, wcet=%lu us, calls=%lu\r\n",
+                   task_prof[i].name,
+                   (unsigned long)task_prof[i].last_us,
+                   (unsigned long)task_prof[i].wcet_us,
+                   (unsigned long)task_prof[i].calls);
+    }
+    LOGGER_LOG("TOTAL_TICK: last=%lu us, wcet=%lu us, calls=%lu\r\n",
+               (unsigned long)task_prof_total.last_us,
+               (unsigned long)task_prof_total.wcet_us,
+               (unsigned long)task_prof_total.calls);
+
+    /* 2) WCET por categorías: sensores / actuadores / sistema */
+    /* Secciones internas de task_sistema: [0]=IN, [1]=LG, [2]=EE, [3]=LCD, [4]=LED */
+    uint32_t s_last[5]={0}, s_wcet[5]={0};
+    task_sistema_prof_get(s_last, s_wcet);
+
+    /* índices de tareas por nombre .c */
+    int idx_sensor=-1, idx_act=-1;
+    for (uint32_t i = 0; i < TASK_QTY; i++) {
+        if (0 == strcmp(task_prof[i].name, "task_sensor.c"))   idx_sensor = (int)i;
+        if (0 == strcmp(task_prof[i].name, "task_actuator.c")) idx_act    = (int)i;
+    }
+
+    /* categorías (como definimos con vos):
+       sensores  = task_sensor + IN
+       actuadores= task_actuator + LED
+       sistema   = LCD + LG + EE
+    */
+    uint32_t sensores_last = (idx_sensor>=0 ? task_prof[idx_sensor].last_us : 0) + s_last[0];
+    uint32_t sensores_wcet = (idx_sensor>=0 ? task_prof[idx_sensor].wcet_us : 0) + s_wcet[0];
+
+    uint32_t actuadores_last = (idx_act>=0 ? task_prof[idx_act].last_us : 0) + s_last[4];
+    uint32_t actuadores_wcet = (idx_act>=0 ? task_prof[idx_act].wcet_us : 0) + s_wcet[4];
+
+    uint32_t sistema_last = s_last[3] + s_last[1] + s_last[2];
+    uint32_t sistema_wcet = s_wcet[3] + s_wcet[1] + s_wcet[2];
+
+    uint32_t total_last = sensores_last + actuadores_last + sistema_last;
+    uint32_t total_wcet = sensores_wcet + actuadores_wcet + sistema_wcet;
+
+    LOGGER_LOG("--- WCET por categoria (us) ---\r\n");
+    LOGGER_LOG("sensores  : last=%lu us, wcet=%lu us\r\n",
+               (unsigned long)sensores_last,  (unsigned long)sensores_wcet);
+    LOGGER_LOG("actuadores: last=%lu us, wcet=%lu us\r\n",
+               (unsigned long)actuadores_last,(unsigned long)actuadores_wcet);
+    LOGGER_LOG("sistema   : last=%lu us, wcet=%lu us\r\n",
+               (unsigned long)sistema_last,   (unsigned long)sistema_wcet);
+    LOGGER_LOG("TOTAL(sum): last=%lu us, wcet=%lu us\r\n",
+               (unsigned long)total_last,     (unsigned long)total_wcet);
+
+    /* 3) Uso de CPU del tick (inst/EMA/max) */
+    LOGGER_LOG("CPU uso: inst=%.1f%%, ema=%.1f%%, max(WCET)=%.1f%% (tick=%lu us)\r\n",
+               cpu_use_inst_pct, cpu_use_ema_pct, cpu_use_max_pct,
+               (unsigned long)systick_period_us());
+}
+
+/********************** Implementación ****************************************/
+void app_init(void)
+{
+    LOGGER_LOG("\r\n");
+    LOGGER_LOG("Iniciando aplicación - Tick [ms] = %lu\r\n", HAL_GetTick());
+
+    g_app_cnt = G_APP_CNT_INI;
+
+    dwt_init();
+
+    /* Sensor de temperatura cada 50 ms (match con UI) */
+    sen_temp_init(&hadc1, &hadc2, ADC_CHANNEL_0, 50, 3.30f);
+
+    LOGGER_LOG("Cantidad de tareas: %u\r\n", (unsigned)TASK_QTY);
+
+    for (uint32_t i = 0; i < TASK_QTY; i++) {
+        task_prof[i].name        = task_cfg_list[i].name;
+        task_prof[i].last_cycles = 0;
+        task_prof[i].wcet_cycles = 0;
+        task_prof[i].last_us     = 0;
+        task_prof[i].wcet_us     = 0;
+        task_prof[i].calls       = 0;
+
+        if (task_cfg_list[i].task_init) {
+            task_cfg_list[i].task_init(task_cfg_list[i].parameters);
+        }
+    }
+}
+
+void app_update(void)
+{
+    if (G_APP_TICK_CNT_INI < g_app_tick_cnt) {
+        g_app_tick_cnt--;
+        g_app_cnt++;
+
+        uint32_t tick_start = dwt_get_cycles();
+
+        for (uint32_t i = 0; i < TASK_QTY; i++) {
+            if (task_cfg_list[i].task_update) {
+                uint32_t t0 = dwt_get_cycles();
+
+                task_cfg_list[i].task_update(task_cfg_list[i].parameters);
+
+                uint32_t dt_cycles = dwt_get_cycles() - t0;
+                uint32_t dt_us     = cycles_to_us(dt_cycles);
+
+                task_prof[i].last_cycles = dt_cycles;
+                task_prof[i].last_us     = dt_us;
+                task_prof[i].calls++;
+
+                if (dt_cycles > task_prof[i].wcet_cycles) {
+                    task_prof[i].wcet_cycles = dt_cycles;
+                    task_prof[i].wcet_us     = dt_us;
+                }
+            }
+        }
+
+        uint32_t tick_dt_cycles = dwt_get_cycles() - tick_start;
+        uint32_t tick_dt_us     = cycles_to_us(tick_dt_cycles);
+
+        task_prof_total.last_cycles = tick_dt_cycles;
+        task_prof_total.last_us     = tick_dt_us;
+        task_prof_total.calls++;
+
+        if (tick_dt_cycles > task_prof_total.wcet_cycles) {
+            task_prof_total.wcet_cycles = tick_dt_cycles;
+            task_prof_total.wcet_us     = tick_dt_us;
+        }
+
+        /* Uso de CPU del tick */
+        uint32_t tick_us = systick_period_us();
+        cpu_use_inst_pct = (tick_us > 0) ? ((float)task_prof_total.last_us * 100.0f) / (float)tick_us : 0.0f;
+        cpu_use_ema_pct  = (CPU_EMA_ALPHA * cpu_use_inst_pct) + ((1.0f - CPU_EMA_ALPHA) * cpu_use_ema_pct);
+        float wcet_pct   = (tick_us > 0) ? ((float)task_prof_total.wcet_us * 100.0f) / (float)tick_us : 0.0f;
+        if (wcet_pct > cpu_use_max_pct) cpu_use_max_pct = wcet_pct;
+
+        if ((++s_prof_tick % s_prof_dump_every) == 0) {
+            wcet_dump();
+        }
+    }
+}
+
+void HAL_SYSTICK_Callback(void)
+{
+    g_app_tick_cnt++;
+}
